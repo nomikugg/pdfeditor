@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use reqwest::Client;
-use serde::Deserialize;
 use tokio::fs;
 use uuid::Uuid;
 
@@ -15,24 +14,40 @@ pub struct FileStore {
 
 #[derive(Debug)]
 enum StorageBackend {
-    Local { root: PathBuf },
-    Gcs { bucket: String, client: Client },
-}
-
-#[derive(Debug, Deserialize)]
-struct MetadataTokenResponse {
-    access_token: String,
+    Local {
+        root: PathBuf,
+    },
+    Supabase {
+        url: String,
+        service_role_key: String,
+        bucket: String,
+        client: Client,
+    },
 }
 
 impl FileStore {
     pub async fn new(root: PathBuf) -> Result<Self, AppError> {
-        if let Ok(bucket) = std::env::var("GCS_BUCKET_NAME").or_else(|_| std::env::var("GCS_BUCKET")) {
-            return Ok(Self {
-                backend: StorageBackend::Gcs {
-                    bucket,
-                    client: Client::new(),
-                },
-            });
+        let supabase_url = std::env::var("SUPABASE_URL").ok().map(|v| v.trim().to_string());
+        let supabase_service_key = std::env::var("SUPABASE_SERVICE_ROLE_KEY")
+            .ok()
+            .map(|v| v.trim().to_string());
+        let supabase_bucket = std::env::var("SUPABASE_STORAGE_BUCKET")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "pdf-files".to_string());
+
+        if let (Some(url), Some(service_role_key)) = (supabase_url, supabase_service_key) {
+            if !url.is_empty() && !service_role_key.is_empty() {
+                return Ok(Self {
+                    backend: StorageBackend::Supabase {
+                        url,
+                        service_role_key,
+                        bucket: supabase_bucket,
+                        client: Client::new(),
+                    },
+                });
+            }
         }
 
         if !root.exists() {
@@ -57,10 +72,12 @@ impl FileStore {
                 fs::write(path, bytes).await?;
                 Ok(())
             }
-            StorageBackend::Gcs { bucket, client } => {
-                let token = resolve_gcs_access_token(client).await?;
-                upload_pdf_to_gcs(client, bucket, id, bytes, &token).await
-            }
+            StorageBackend::Supabase {
+                url,
+                service_role_key,
+                bucket,
+                client,
+            } => upload_pdf_to_supabase(client, url, service_role_key, bucket, id, bytes).await,
         }
     }
 
@@ -74,10 +91,12 @@ impl FileStore {
 
                 Ok(fs::read(path).await?)
             }
-            StorageBackend::Gcs { bucket, client } => {
-                let token = resolve_gcs_access_token(client).await?;
-                download_pdf_from_gcs(client, bucket, id, &token).await
-            }
+            StorageBackend::Supabase {
+                url,
+                service_role_key,
+                bucket,
+                client,
+            } => download_pdf_from_supabase(client, url, service_role_key, bucket, id).await,
         }
     }
 
@@ -111,80 +130,63 @@ impl FileStore {
     }
 }
 
-async fn resolve_gcs_access_token(client: &Client) -> Result<String, AppError> {
-    if let Ok(token) = std::env::var("GCS_ACCESS_TOKEN").or_else(|_| std::env::var("GOOGLE_OAUTH_ACCESS_TOKEN")) {
-        let trimmed = token.trim().to_string();
-        if !trimmed.is_empty() {
-            return Ok(trimmed);
-        }
-    }
-
-    let response = client
-        .get("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token")
-        .header("Metadata-Flavor", "Google")
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("No se pudo obtener token de GCP: {e}")))?;
-
-    if !response.status().is_success() {
-        return Err(AppError::Internal(format!("No se pudo obtener token de GCP: {}", response.status())));
-    }
-
-    let payload = response
-        .json::<MetadataTokenResponse>()
-        .await
-        .map_err(|e| AppError::Internal(format!("No se pudo leer token de GCP: {e}")))?;
-
-    Ok(payload.access_token)
+fn supabase_object_name(id: &Uuid) -> String {
+    format!("{id}.pdf")
 }
 
-async fn upload_pdf_to_gcs(
+async fn upload_pdf_to_supabase(
     client: &Client,
+    url: &str,
+    service_role_key: &str,
     bucket: &str,
     id: &Uuid,
     bytes: &[u8],
-    token: &str,
 ) -> Result<(), AppError> {
-    let object_name = format!("{id}.pdf");
-    let url = format!(
-        "https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o?uploadType=media&name={object_name}"
-    );
+    let base_url = url.trim_end_matches('/');
+    let object_name = supabase_object_name(id);
+    let endpoint = format!("{base_url}/storage/v1/object/{bucket}/{object_name}");
 
     let response = client
-        .post(url)
-        .bearer_auth(token)
+        .post(endpoint)
+        .header("apikey", service_role_key)
+        .header("Authorization", format!("Bearer {service_role_key}"))
+        .header("x-upsert", "true")
         .header("Content-Type", "application/pdf")
         .body(bytes.to_vec())
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("No se pudo subir a GCS: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("No se pudo subir a Supabase Storage: {e}")))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let details = response.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!("No se pudo subir a GCS: {} {details}", status)));
+        return Err(AppError::Internal(format!(
+            "No se pudo subir a Supabase Storage: {} {details}",
+            status
+        )));
     }
 
     Ok(())
 }
 
-async fn download_pdf_from_gcs(
+async fn download_pdf_from_supabase(
     client: &Client,
+    url: &str,
+    service_role_key: &str,
     bucket: &str,
     id: &Uuid,
-    token: &str,
 ) -> Result<Vec<u8>, AppError> {
-    let object_name = format!("{id}.pdf");
-    let url = format!(
-        "https://storage.googleapis.com/storage/v1/b/{bucket}/o/{object_name}?alt=media"
-    );
+    let base_url = url.trim_end_matches('/');
+    let object_name = supabase_object_name(id);
+    let endpoint = format!("{base_url}/storage/v1/object/{bucket}/{object_name}");
 
     let response = client
-        .get(url)
-        .bearer_auth(token)
+        .get(endpoint)
+        .header("apikey", service_role_key)
+        .header("Authorization", format!("Bearer {service_role_key}"))
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("No se pudo descargar desde GCS: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("No se pudo descargar desde Supabase Storage: {e}")))?;
 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Err(AppError::NotFound(format!("No existe fileId={id}")));
@@ -193,13 +195,20 @@ async fn download_pdf_from_gcs(
     if !response.status().is_success() {
         let status = response.status();
         let details = response.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!("No se pudo descargar desde GCS: {} {details}", status)));
+        if status == reqwest::StatusCode::BAD_REQUEST && details.to_ascii_lowercase().contains("not found") {
+            return Err(AppError::NotFound(format!("No existe fileId={id}")));
+        }
+
+        return Err(AppError::Internal(format!(
+            "No se pudo descargar desde Supabase Storage: {} {details}",
+            status
+        )));
     }
 
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| AppError::Internal(format!("No se pudo leer bytes desde GCS: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("No se pudo leer bytes desde Supabase Storage: {e}")))?;
 
     Ok(bytes.to_vec())
 }
