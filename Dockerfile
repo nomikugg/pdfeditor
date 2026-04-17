@@ -4,11 +4,9 @@ FROM rust:1.90-bookworm AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
-
 COPY src ./src
-RUN cargo build --release
+RUN cargo build --release \
+    && ls -lh /app/target/release/pdf-editor-backend
 
 
 FROM debian:bookworm-slim AS runtime
