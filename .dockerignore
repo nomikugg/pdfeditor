@@ -1,0 +1,10 @@
+target/
+files/
+.env
+.env.*
+pdfium.dll
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

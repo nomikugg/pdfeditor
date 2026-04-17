@@ -5,7 +5,6 @@ use axum::response::Response;
 use crate::error::AppError;
 use crate::AppState;
 use serde::Deserialize;
-use std::fs;
 use tracing::info;
 use uuid::Uuid;
 
@@ -19,12 +18,7 @@ pub async fn download_pdf(
     State(state): State<AppState>,
     Query(query): Query<DownloadQuery>,
 ) -> Result<Response, AppError> {
-    let path = state
-        .store
-        .path_for(&query.file_id)
-        .ok_or_else(|| AppError::NotFound(format!("No existe fileId={}", query.file_id)))?;
-
-    let bytes = fs::read(&path)?;
+    let bytes = state.store.read_pdf_bytes(&query.file_id).await?;
     info!("PDF descargado. fileId={}", query.file_id);
 
     let filename = format!("{}.pdf", query.file_id);

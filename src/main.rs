@@ -36,12 +36,14 @@ async fn main() -> Result<(), AppError> {
         )
         .init();
 
-    let pdfium_dll_path = std::env::var("PDFIUM_DLL_PATH").unwrap_or_else(|_| "pdfium.dll".to_string());
-    let bindings = Pdfium::bind_to_library(&pdfium_dll_path)
-        .map_err(|e| AppError::Pdfium(format!("No se pudo cargar {}: {e}", pdfium_dll_path)))?;
+    let pdfium_library_path = resolve_pdfium_library_path();
+    let bindings = Pdfium::bind_to_library(&pdfium_library_path)
+        .map_err(|e| AppError::Pdfium(format!("No se pudo cargar {}: {e}", pdfium_library_path)))?;
     let pdfium = Arc::new(Pdfium::new(bindings));
 
-    let files_root = PathBuf::from("files");
+    let files_root = std::env::var("FILES_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("files"));
     let store = Arc::new(FileStore::new(files_root).await?);
     store.cleanup_older_than(std::time::Duration::from_secs(60 * 60 * 24 * 7)).await?;
 
@@ -57,11 +59,46 @@ async fn main() -> Result<(), AppError> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8080);
+    let host = std::env::var("BIND_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr = format!("{}:{}", host, port)
+        .parse::<SocketAddr>()
+        .map_err(|e| AppError::Internal(format!("No se pudo resolver la direccion de escucha: {e}")))?;
     info!("Backend iniciado en http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn resolve_pdfium_library_path() -> String {
+    if let Ok(path) = std::env::var("PDFIUM_LIBRARY_PATH") {
+        return path;
+    }
+
+    if let Ok(path) = std::env::var("PDFIUM_DLL_PATH") {
+        return path;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return "pdfium.dll".to_string();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return "libpdfium.so".to_string();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return "libpdfium.dylib".to_string();
+    }
+
+    #[allow(unreachable_code)]
+    "pdfium.dll".to_string()
 }

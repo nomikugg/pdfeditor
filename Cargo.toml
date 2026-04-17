@@ -17,3 +17,4 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 dotenvy = "0.15"
 lopdf = "0.35"
 ttf-parser = "0.25"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
+use std::sync::{Arc as SyncArc, Mutex, OnceLock};
 use std::sync::Arc;
 
 use lopdf::content::Content;
@@ -16,18 +17,49 @@ use crate::pdf::font::ensure_unicode_overlay_fonts;
 use crate::pdf::renderer::{append_unicode_text_operations, DrawTextOp};
 use crate::storage::file_store::FileStore;
 
+fn temp_pdf_path(prefix: &str, file_id: &Uuid) -> PathBuf {
+    std::env::temp_dir().join(format!("pdf-editor-{prefix}-{file_id}.pdf"))
+}
+
+fn verbose_pdf_logs_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("PDF_VERBOSE_LOGS")
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+fn width_cache_key(text: &str, family: &str, bold: bool, font_size: f32) -> String {
+    format!("{}|{}|{}|{:.3}", family, if bold { "b" } else { "r" }, text, font_size)
+}
+
+fn font_width_cache() -> &'static Mutex<std::collections::HashMap<String, f32>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, f32>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn font_bytes_cache() -> &'static Mutex<std::collections::HashMap<String, SyncArc<Vec<u8>>>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, SyncArc<Vec<u8>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 pub async fn analyze_pdf(
     pdfium: &Pdfium,
     store: &Arc<FileStore>,
     file_id: Uuid,
 ) -> Result<AnalyzeResponse, AppError> {
-    let input_path = store
-        .path_for(&file_id)
-        .ok_or_else(|| AppError::NotFound(format!("No existe fileId={file_id}")))?;
+    let input_bytes = store.read_pdf_bytes(&file_id).await?;
+    let input_path = temp_pdf_path("input", &file_id);
+    tokio::fs::write(&input_path, &input_bytes)
+        .await
+        .map_err(|e| AppError::Internal(format!("No se pudo preparar el PDF temporal: {e}")))?;
 
     let document = pdfium
         .load_pdf_from_file(&input_path, None)
         .map_err(|e| AppError::Pdfium(format!("No se pudo abrir el PDF: {e}")))?;
+
+    let _ = tokio::fs::remove_file(&input_path).await;
 
     let mut pages_output = Vec::new();
 
@@ -112,12 +144,9 @@ pub async fn apply_operations(
 ) -> Result<ApplyResponse, AppError> {
     info!("Recibi apply_operations: fileId={}, ops={}", file_id, operations.len());
 
-    let input_path = store
-        .path_for(&file_id)
-        .ok_or_else(|| AppError::NotFound(format!("No existe fileId={file_id}")))?;
-
+    let input_bytes = store.read_pdf_bytes(&file_id).await?;
     let mut document =
-        LoDocument::load(&input_path).map_err(|e| AppError::Pdfium(format!("No se pudo abrir el PDF: {e}")))?;
+        LoDocument::load_mem(&input_bytes).map_err(|e| AppError::Pdfium(format!("No se pudo abrir el PDF: {e}")))?;
 
     let pages = document.get_pages();
     let mut batch_used_utf16 = BTreeSet::new();
@@ -146,11 +175,14 @@ pub async fn apply_operations(
     }
 
     let new_file_id = Uuid::new_v4();
-    let out_path = store.path_for_uuid(&new_file_id);
-
+    let mut out_bytes = Vec::new();
     document
-        .save(&out_path)
+        .save_to(&mut out_bytes)
         .map_err(|e| AppError::Pdfium(format!("No se pudo guardar el PDF de salida: {e}")))?;
+
+    store
+        .save_pdf_bytes(&new_file_id, &out_bytes)
+        .await?;
 
     info!("PDF modificado guardado. oldFileId={}, newFileId={}", file_id, new_file_id);
 
@@ -298,6 +330,9 @@ fn apply_replace_operation(
                         overlay_font,
                         &mut overlays,
                     );
+                    if replacements > 0 {
+                        break;
+                    }
                 }
             }
             "'" => {
@@ -317,6 +352,9 @@ fn apply_replace_operation(
                         overlay_font,
                         &mut overlays,
                     );
+                    if replacements > 0 {
+                        break;
+                    }
                 }
             }
             "\"" => {
@@ -336,6 +374,9 @@ fn apply_replace_operation(
                         overlay_font,
                         &mut overlays,
                     );
+                    if replacements > 0 {
+                        break;
+                    }
                 }
             }
             "TJ" => {
@@ -354,6 +395,9 @@ fn apply_replace_operation(
                         overlay_font,
                         &mut overlays,
                     );
+                    if replacements > 0 {
+                        break;
+                    }
                 }
             }
             _ => {}
@@ -484,11 +528,13 @@ fn replace_text_object(
             preview,
             op.new_text
         );
-        info!("Original bytes: {:02X?}", bytes);
-        info!("Decoded preview: '{}'", preview);
-        info!("Each char as hex:");
-        for ch in preview.chars() {
-            info!("  '{}' = U+{:04X}", ch, ch as u32);
+        if verbose_pdf_logs_enabled() {
+            info!("Original bytes: {:02X?}", bytes);
+            info!("Decoded preview: '{}'", preview);
+            info!("Each char as hex:");
+            for ch in preview.chars() {
+                info!("  '{}' = U+{:04X}", ch, ch as u32);
+            }
         }
 
         let safe_new_text = op.new_text.trim();
@@ -572,15 +618,17 @@ fn replace_text_in_array(
             joined,
             op.new_text
         );
-        info!("TJ decoded joined preview: '{}'", joined);
-        info!("TJ each char as hex:");
-        for ch in joined.chars() {
-            info!("  '{}' = U+{:04X}", ch, ch as u32);
-        }
-        info!("TJ original fragment bytes:");
-        for (idx, item) in items.iter().enumerate() {
-            if let Object::String(raw_bytes, _) = item {
-                info!("  fragment[{}] bytes: {:02X?}", idx, raw_bytes);
+        if verbose_pdf_logs_enabled() {
+            info!("TJ decoded joined preview: '{}'", joined);
+            info!("TJ each char as hex:");
+            for ch in joined.chars() {
+                info!("  '{}' = U+{:04X}", ch, ch as u32);
+            }
+            info!("TJ original fragment bytes:");
+            for (idx, item) in items.iter().enumerate() {
+                if let Object::String(raw_bytes, _) = item {
+                    info!("  fragment[{}] bytes: {:02X?}", idx, raw_bytes);
+                }
             }
         }
 
@@ -851,6 +899,11 @@ fn get_page_width(document: &LoDocument, page_id: lopdf::ObjectId) -> Option<f32
 }
 
 fn measure_text_width_points(text: &str, family: &str, bold: bool, font_size: f32) -> Option<f32> {
+    let cache_key = width_cache_key(text, family, bold, font_size);
+    if let Some(cached) = font_width_cache().lock().ok().and_then(|cache| cache.get(&cache_key).copied()) {
+        return Some(cached);
+    }
+
     let font_file = match (family, bold) {
         ("arial", true) => "ARIALBD.TTF",
         ("arial", false) => "ARIAL.TTF",
@@ -862,8 +915,19 @@ fn measure_text_width_points(text: &str, family: &str, bold: bool, font_size: f3
         .join("src")
         .join("fonts")
         .join(font_file);
-    let bytes = std::fs::read(path).ok()?;
-    let face = Face::parse(&bytes, 0).ok()?;
+    let cache_path_key = path.to_string_lossy().to_string();
+    let cached_bytes = {
+        let mut cache = font_bytes_cache().lock().ok()?;
+        if let Some(existing) = cache.get(&cache_path_key) {
+            existing.clone()
+        } else {
+            let loaded = SyncArc::new(std::fs::read(&path).ok()?);
+            cache.insert(cache_path_key, loaded.clone());
+            loaded
+        }
+    };
+
+    let face = Face::parse(&cached_bytes, 0).ok()?;
     let units_per_em = face.units_per_em() as f32;
 
     let mut total_units: f32 = 0.0;
@@ -876,7 +940,16 @@ fn measure_text_width_points(text: &str, family: &str, bold: bool, font_size: f3
         total_units += advance;
     }
 
-    Some((total_units / units_per_em) * font_size)
+    let width = (total_units / units_per_em) * font_size;
+
+    if let Ok(mut cache) = font_width_cache().lock() {
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(cache_key, width);
+    }
+
+    Some(width)
 }
 
 fn parse_rgb_color(color: Option<&str>) -> Option<(f32, f32, f32)> {
