@@ -57,4 +57,4 @@ ENV STARTUP_DEBUG=1
 
 EXPOSE 8080
 
-CMD ["/bin/sh", "-c", "echo '== libpdfium diagnostics =='; ls -l /app/libpdfium.so; ldd /app/libpdfium.so || true; echo '== app start =='; /app/app"]
+CMD ["/bin/sh", "-c", "set -x; echo '== runtime config =='; echo \"PORT=${PORT:-unset}\"; echo \"BIND_HOST=${BIND_HOST:-unset}\"; echo \"PDFIUM_LIBRARY_PATH=${PDFIUM_LIBRARY_PATH:-unset}\"; echo \"FILES_ROOT=${FILES_ROOT:-unset}\"; echo \"STARTUP_DEBUG=${STARTUP_DEBUG:-unset}\"; echo '== app binary =='; ls -l /app/app; ldd /app/app || true; echo '== libpdfium diagnostics =='; ls -l /app/libpdfium.so; ldd /app/libpdfium.so || true; echo '== app start =='; /app/app; code=$?; echo \"== app exit code: ${code} ==\"; exit ${code}"]
