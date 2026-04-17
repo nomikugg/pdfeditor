@@ -176,6 +176,7 @@ pub async fn apply_operations(
 
     let new_file_id = Uuid::new_v4();
     let mut out_bytes = Vec::new();
+    document.compress();
     document
         .save_to(&mut out_bytes)
         .map_err(|e| AppError::Pdfium(format!("No se pudo guardar el PDF de salida: {e}")))?;
