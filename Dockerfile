@@ -4,19 +4,27 @@ FROM rust:1.85-bookworm AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-
+RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release
+
+COPY src ./src
+RUN cargo build --release
+
 
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates \
+       libstdc++6 \
+       fontconfig \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/pdf-editor-backend /app/pdf-editor-backend
+COPY --from=builder /app/target/release/pdf-editor-backend /app/app
 COPY libpdfium.so /app/libpdfium.so
+COPY src/fonts /app/src/fonts
+
 RUN mkdir -p /app/files \
     && chmod 777 /app/files
 
@@ -27,4 +35,4 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-CMD ["/app/pdf-editor-backend"]
+CMD ["/app/app"]
