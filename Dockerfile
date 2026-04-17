@@ -27,6 +27,19 @@ RUN apt-get update \
        libnss3 \
        libexpat1 \
        zlib1g \
+         libx11-6 \
+         libx11-xcb1 \
+         libxcb1 \
+         libxext6 \
+         libxrender1 \
+         libxfixes3 \
+         libxdamage1 \
+         libxrandr2 \
+         libxcomposite1 \
+         libxkbcommon0 \
+         libdrm2 \
+         libgbm1 \
+         libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/pdf-editor-backend /app/app
@@ -39,7 +52,8 @@ RUN mkdir -p /app/files \
 ENV PDFIUM_LIBRARY_PATH=/app/libpdfium.so
 ENV FILES_ROOT=/app/files
 ENV BIND_HOST=0.0.0.0
+ENV RUST_BACKTRACE=1
 
 EXPOSE 8080
 
-CMD ["/app/app"]
+CMD ["/bin/sh", "-c", "echo '== libpdfium diagnostics =='; ls -l /app/libpdfium.so; ldd /app/libpdfium.so || true; echo '== app start =='; /app/app"]
