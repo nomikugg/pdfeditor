@@ -17,17 +17,16 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates \
-         libc6 \
-         libgcc-s1 \
        libstdc++6 \
        fontconfig \
-         libfreetype6 \
-         libjpeg62-turbo \
-         libpng16-16 \
-         libopenjp2-7 \
-         liblcms2-2 \
-         libnss3 \
-         libexpat1 \
+       libfreetype6 \
+       libjpeg-turbo8 \
+       libpng16-16 \
+       libopenjp2-7 \
+       liblcms2-2 \
+       libnss3 \
+       libexpat1 \
+       zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/pdf-editor-backend /app/app
