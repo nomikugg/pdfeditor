@@ -17,8 +17,17 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates \
+         libc6 \
+         libgcc-s1 \
        libstdc++6 \
        fontconfig \
+         libfreetype6 \
+         libjpeg62-turbo \
+         libpng16-16 \
+         libopenjp2-7 \
+         liblcms2-2 \
+         libnss3 \
+         libexpat1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/pdf-editor-backend /app/app
@@ -31,7 +40,6 @@ RUN mkdir -p /app/files \
 ENV PDFIUM_LIBRARY_PATH=/app/libpdfium.so
 ENV FILES_ROOT=/app/files
 ENV BIND_HOST=0.0.0.0
-ENV PORT=8080
 
 EXPOSE 8080
 
