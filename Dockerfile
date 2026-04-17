@@ -11,7 +11,7 @@ COPY src ./src
 RUN cargo build --release
 
 
-FROM debian:bookworm-slim AS runtime
+FROM ubuntu:22.04 AS runtime
 WORKDIR /app
 
 RUN apt-get update \
