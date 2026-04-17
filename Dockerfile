@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.90-jammy AS builder
+FROM rust:1.90-bookworm AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
@@ -11,7 +11,7 @@ COPY src ./src
 RUN cargo build --release
 
 
-FROM ubuntu:22.04 AS runtime
+FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
 RUN apt-get update \
@@ -20,7 +20,7 @@ RUN apt-get update \
        libstdc++6 \
        fontconfig \
        libfreetype6 \
-       libjpeg-turbo8 \
+    libjpeg62-turbo \
        libpng16-16 \
        libopenjp2-7 \
        liblcms2-2 \
